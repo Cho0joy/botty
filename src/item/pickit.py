@@ -1,8 +1,6 @@
 import time
 import keyboard
 import cv2
-from operator import itemgetter
-
 from utils.custom_mouse import mouse
 from config import Config
 from logger import Logger
@@ -11,8 +9,6 @@ from item import ItemFinder, Item
 from ui import UiManager
 from ui import BeltManager
 from char import IChar
-
-
 class PickIt:
     def __init__(self, screen: Screen, item_finder: ItemFinder, ui_manager: UiManager, belt_manager: BeltManager):
         self._item_finder = item_finder
@@ -21,7 +17,6 @@ class PickIt:
         self._ui_manager = ui_manager
         self._config = Config()
         self._last_closest_item: Item = None
-
     def pick_up_items(self, char: IChar, is_at_trav: bool = False) -> bool:
         """
         Pick up all items with specified char
@@ -47,12 +42,12 @@ class PickIt:
         did_force_move = False
         while not time_out:
             if (time.time() - start) > 28:
+            if (time.time() - start) > 22:
                 time_out = True
                 Logger.warning("Got stuck during pickit, skipping it this time...")
                 break
             img = self._screen.grab()
             item_list = self._item_finder.search(img)
-
             # Check if we need to pick up certain pots more pots
             need_pots = self._belt_manager.get_pot_needs()
             if need_pots["mana"] <= 0:
@@ -61,11 +56,9 @@ class PickIt:
                 item_list = [x for x in item_list if "healing_potion" not in x.name]
             if need_pots["rejuv"] <= 0:
                 item_list = [x for x in item_list if "rejuvenation_potion" not in x.name]
-
             # TODO: Hacky solution for trav only gold pickup, hope we can soon read gold ammount and filter by that...
             if self._config.char["gold_trav_only"] and not is_at_trav:
                 item_list = [x for x in item_list if "misc_gold" not in x.name]
-
             if len(item_list) == 0:
                 # if twice no item was found, break
                 found_nothing += 1
@@ -78,10 +71,14 @@ class PickIt:
                     time.sleep(0.2)
             else:
                 found_nothing = 0
-                item_list.sort(key=itemgetter('dist'))
-                closest_item = next((obj for obj in item_list if "misc_gold" not in obj["name"]), None)
-                if not closest_item:
-                    closest_item = item_list[0]
+                closest_item = item_list[0]
+                for item in item_list[1:]:
+                    if closest_item.dist > item.dist:
+                    # if we're looting Trav as a non-teleporter, we need to spend less time stuck on
+                    # stuff like gold because we're gonna be looting multiple times from a few different positions
+                    if closest_item.dist > item.dist and not \
+                        (is_at_trav and not char.can_teleport() and item.name in skip_items):
+                        closest_item = item
 
                 # check if we trying to pickup the same item for a longer period of time
                 force_move = False
@@ -99,13 +96,11 @@ class PickIt:
                         Logger.warning(f"Could not pick up: {closest_item.name}. Continue with other items")
                         skip_items.append(closest_item.name)
                 curr_item_to_pick = closest_item
-
                 # To avoid endless teleport or telekinesis loop
-                force_pick_up = char.capabilities.can_teleport_natively and \
+                force_pick_up = char.can_teleport() and \
                                 self._last_closest_item is not None and \
                                 self._last_closest_item.name == closest_item.name and \
                                 abs(self._last_closest_item.dist - closest_item.dist) < 20
-
                 x_m, y_m = self._screen.convert_screen_to_monitor(closest_item.center)
                 if not force_move and (closest_item.dist < self._config.ui_pos["item_dist"] or force_pick_up):
                     self._last_closest_item = None
@@ -115,11 +110,9 @@ class PickIt:
                     # no need to stash potions, scrolls, or gold
                     if "potion" not in closest_item.name and "tp_scroll" != closest_item.name and "misc_gold" not in closest_item.name:
                         found_items = True
-
                     prev_cast_start = char.pick_up_item((x_m, y_m), item_name=closest_item.name, prev_cast_start=prev_cast_start)
-                    if not char.capabilities.can_teleport_natively:
+                    if not char.can_teleport():
                         time.sleep(0.2)
-
                     if self._ui_manager.is_overburdened():
                         found_items = True
                         Logger.warning("Inventory full, skipping pickit!")
@@ -133,16 +126,13 @@ class PickIt:
                 else:
                     char.pre_move()
                     char.move((x_m, y_m), force_move=True)
-                    if not char.capabilities.can_teleport_natively:
+                    if not char.can_teleport():
                         time.sleep(0.3)
                     time.sleep(0.1)
                     # save closeset item for next time to check potential endless loops of not reaching it or of telekinsis/teleport
                     self._last_closest_item = closest_item
-
         keyboard.send(self._config.char["show_items"])
         return found_items
-
-
 if __name__ == "__main__":
     import os
     from config import Config
@@ -152,17 +142,16 @@ if __name__ == "__main__":
     from template_finder import TemplateFinder
     from pather import Pather
     import keyboard
-
     keyboard.add_hotkey('f12', lambda: Logger.info('Force Exit (f12)') or os._exit(1))
     keyboard.wait("f11")
     config = Config()
-    screen = Screen()
+    screen = Screen(config.general["monitor"])
     t_finder = TemplateFinder(screen)
     ui_manager = UiManager(screen, t_finder)
     belt_manager = BeltManager(screen, t_finder)
     belt_manager._pot_needs = {"rejuv": 0, "health": 2, "mana": 2}
     pather = Pather(screen, t_finder)
     item_finder = ItemFinder()
-    char = Hammerdin(config.hammerdin, config.char, t_finder, ui_manager, pather)
+    char = Hammerdin(config.hammerdin, config.char, screen, t_finder, ui_manager, pather)
     pickit = PickIt(screen, item_finder, ui_manager, belt_manager)
     print(pickit.pick_up_items(char))
